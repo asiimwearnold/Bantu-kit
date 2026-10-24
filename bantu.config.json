@@ -1,6 +1,6 @@
 {
   "providers": {
-    "gemini":     {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "key_env": "GEMINI_API_KEY",     "rpm": 8,  "daily_tokens": 600000},
+    "gemini":     {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "key_env": "GEMINI_API_KEY",     "rpm": 8,  "daily_tokens": 600000, "timeout_sec":240,  "extra_body": {"reasoning_effort": "low"}},
     "cerebras":   {"base_url": "https://api.cerebras.ai/v1",                              "key_env": "CEREBRAS_API_KEY",   "rpm": 20, "daily_tokens": 800000},
     "mistral":    {"base_url": "https://api.mistral.ai/v1",                               "key_env": "MISTRAL_API_KEY",    "rpm": 30, "daily_tokens": 800000},
     "groq":       {"base_url": "https://api.groq.com/openai/v1",                          "key_env": "GROQ_API_KEY",       "rpm": 20, "daily_tokens": 150000},
