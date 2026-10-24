@@ -12,7 +12,8 @@ def mock_reply(role: str, messages: list[dict]) -> str:
             "read": ["tests/test_greet.py"], "acceptance": "python -m pytest -q"}]})
     if role == "reviewer":
         if turn == 0:
-            return "@@write REVIEW.md\n# Review (mock)\nNo issues found.\n@@end\n@@finish\nReview written.\n@@end"
+            return ("@@write REVIEW.md\n# Review (mock)\n\nVerdict: pass\n\nNo issues found.\n@@end\n"
+                    "@@finish\nReview written.\n@@end")
         return "@@finish\nDone.\n@@end"
     # coder
     if turn == 0 and "greet.js" in messages[1]["content"]:

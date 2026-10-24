@@ -4,13 +4,14 @@
     "cerebras":   {"base_url": "https://api.cerebras.ai/v1",                              "key_env": "CEREBRAS_API_KEY",   "rpm": 20, "daily_tokens": 800000},
     "mistral":    {"base_url": "https://api.mistral.ai/v1",                               "key_env": "MISTRAL_API_KEY",    "rpm": 30, "daily_tokens": 800000},
     "groq":       {"base_url": "https://api.groq.com/openai/v1",                          "key_env": "GROQ_API_KEY",       "rpm": 20, "daily_tokens": 150000},
-    "openrouter": {"base_url": "https://openrouter.ai/api/v1",                            "key_env": "OPENROUTER_API_KEY", "rpm": 15, "daily_tokens": 100000}
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1",                            "key_env": "OPENROUTER_API_KEY", "rpm": 15, "daily_tokens": 100000},
+    "deepseek":   {"base_url": "https://api.deepseek.com",                                "key_env": "DEEPSEEK_API_KEY",   "rpm": 10, "daily_tokens": 600000}
   },
 
   "pools": {
-  "smart": ["gemini/gemini-3.8-flash"],
-  "fast":  ["gemini/gemini-3.8-flash"]
-},
+    "smart": ["gemini/gemini-3.8-flash", "deepseek/deepseek-flash"],
+    "fast":  ["gemini/gemini-3.8-flash", "deepseek/deepseek-flash"]
+  },
   "roles": {"planner": "smart", "reviewer": "smart", "coder": "fast", "default": "fast"},
   "budgets": {
     "task_tokens": 300000,

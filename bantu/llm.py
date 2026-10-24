@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import re
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -48,23 +49,65 @@ class Router:
         self.log_path: Path | None = None
         self.by_model: dict[str, int] = {}
         self.state = {"date": _today(), "total": 0, "providers": {}}
+        self._state_saved = False
         self._load()
 
     # ---- usage state ----------------------------------------------------
     def _load(self) -> None:
         fresh = {"date": _today(), "total": 0, "providers": {}}
-        data: dict = {}
-        if self.state_path.exists():
-            try:
-                data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                data = {}
-        else:
-            data = self.state
-        self.state = data if data.get("date") == _today() else fresh
+        if not self.state_path.exists():
+            if self._state_saved:
+                raise RuntimeError(f"usage state file disappeared: {self.state_path}")
+            self.state = fresh
+            return
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot read usage state {self.state_path}: {exc}") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("providers"), dict):
+            raise RuntimeError(f"invalid usage state structure in {self.state_path}")
+        if not isinstance(data.get("date"), str) or type(data.get("total")) is not int or data["total"] < 0:
+            raise RuntimeError(f"invalid usage counters in {self.state_path}")
+        try:
+            dt.datetime.strptime(data["date"], "%Y-%m-%d")
+        except ValueError as exc:
+            raise RuntimeError(f"invalid usage date in {self.state_path}") from exc
+        for name, provider in data["providers"].items():
+            if (
+                not isinstance(name, str)
+                or not isinstance(provider, dict)
+                or type(provider.get("tokens")) is not int
+                or provider["tokens"] < 0
+                or type(provider.get("requests")) is not int
+                or provider["requests"] < 0
+            ):
+                raise RuntimeError(f"invalid provider usage entry in {self.state_path}")
+        if data["total"] != sum(provider["tokens"] for provider in data["providers"].values()):
+            raise RuntimeError(f"inconsistent usage totals in {self.state_path}")
+        self.state = data if data["date"] == _today() else fresh
+        self._state_saved = True
 
     def _save(self) -> None:
-        self.state_path.write_text(json.dumps(self.state, indent=2), encoding="utf-8")
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.state_path.parent,
+                prefix=f"{self.state_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                json.dump(self.state, temporary, indent=2)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, self.state_path)
+            temporary_path = None
+            self._state_saved = True
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def start_task(self, limit: int | None, log_path: Path) -> None:
         self.task_tokens, self.task_limit, self.log_path, self.by_model = 0, limit, log_path, {}

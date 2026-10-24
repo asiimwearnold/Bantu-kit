@@ -8,10 +8,10 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .agent import run_subagent
+from .agent import AgentResult, run_subagent
 from .config import ROOT, load_project, project_dir
 from .llm import BudgetExceeded, OutOfBudget, ProviderError, Router
-from .tools import Workspace, truncate
+from .tools import ToolError, Workspace, truncate
 
 
 @dataclass
@@ -111,6 +111,17 @@ def _run_sub(router: Router, ws: Workspace, cfg: dict, st: dict, default_accept:
     return SubResult(sid, role, False, f"acceptance still failing after {b['max_fix_attempts']} attempts", attempt, written)
 
 
+def _review_outcome(result: AgentResult, review_text: str | None) -> tuple[bool, str]:
+    if result.status != "done":
+        return False, f"reviewer ended with {result.status}: {result.summary}"
+    if "REVIEW.md" not in result.written or review_text is None:
+        return False, "reviewer did not write REVIEW.md"
+    verdicts = re.findall(r"(?im)^\s*Verdict:\s*(pass|needs work)\s*$", review_text)
+    if verdicts != ["pass"]:
+        return False, "review verdict must be exactly 'Verdict: pass'"
+    return True, "review passed"
+
+
 def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
     """Returns 'done', 'failed' or raises OutOfBudget (task stays queued)."""
     head, body = parse_task(task_path.read_text(encoding="utf-8"))
@@ -164,11 +175,25 @@ def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
             changed = sorted({f for r in results for f in r.files})[:8]
             router.begin_sub(cfg["budgets"]["subtask_tokens"])
             try:
-                run_subagent(router, rev_ws, "reviewer", _role_prompt("reviewer"),
-                             "Review the changed files against SPEC.md. Write REVIEW.md.", ["SPEC.md"] + changed,
-                             6, cfg["budgets"]["max_context_chars"])
-            except BudgetExceeded:
-                log("  reviewer skipped: budget reached")
+                review_result = run_subagent(
+                    router, rev_ws, "reviewer", _role_prompt("reviewer"),
+                    "Review the changed files against SPEC.md. Write REVIEW.md.", ["SPEC.md"] + changed,
+                    6, cfg["budgets"]["max_context_chars"],
+                )
+            except BudgetExceeded as exc:
+                status = "failed"
+                log(f"  REVIEW FAILED: reviewer budget reached: {exc}")
+            else:
+                try:
+                    review_text = rev_ws.read("REVIEW.md") if "REVIEW.md" in review_result.written else None
+                except ToolError as exc:
+                    status = "failed"
+                    log(f"  REVIEW FAILED: could not read reviewer output: {exc}")
+                else:
+                    review_ok, review_note = _review_outcome(review_result, review_text)
+                    log(f"  REVIEW {'PASSED' if review_ok else 'FAILED'}: {review_note}")
+                    if not review_ok:
+                        status = "failed"
     except OutOfBudget as exc:
         paused = True
         log(f"  PAUSED: {exc}")

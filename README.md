@@ -42,6 +42,11 @@ VS Code shortcut: Terminal > Run Task shows "BANTU: doctor / dry run / start dae
 change often, so edit `pools` in `bantu.config.json` to match, and lower each provider's `daily_tokens` and `rpm`
 to what your account really gets. BANTU tries pool entries in order and fails over on rate limits.
 Use different providers for resilience; do not open extra accounts on the same provider to dodge limits.
+Each pool is tried in order: BANTU uses Gemini first and falls back to DeepSeek if it is unavailable, rate
+limited, or has reached its provider-specific cap. DeepSeek's OpenAI-compatible endpoint is configured with
+`deepseek-flash`; use `python -m bantu models` to confirm which model IDs your account currently offers.
+The configured RPM and daily-token values are local safety caps, not a promise of the provider's quota; adjust
+them to match your account.
 
 ## Build the Sente prototype
 
@@ -121,9 +126,16 @@ Any small Linux VPS works; BANTU itself uses almost no CPU. The limit is your to
 ## Safety rules (keep them on)
 
 - Agents can only touch files inside their project folder, never `.git` or `.env`, and cannot edit protected files.
+- Task project names are restricted to direct children of `projects/`; invalid or escaping paths are rejected.
 - Commands are limited to `python`, `pytest`, `ruff`, run in a container with no network, 512 MB and 1 CPU.
-  `BANTU_SANDBOX=local` removes that container: use it only for the dry run.
+  `BANTU_SANDBOX=local` removes that container and runs commands on the host; it is not a security boundary
+  and should be limited to disposable dry runs.
 - Agents never see your API keys, never push or merge. You review every branch.
+- With review enabled, a task is marked successful only when the reviewer writes `REVIEW.md` with
+  `Verdict: pass`. A missing, unfinished, or `needs work` review fails the task; inspect the report and branch
+  before accepting changes.
+- Usage state is written atomically and corrupt or missing-after-start state stops the run instead of resetting
+  token counters. Run one BANTU daemon at a time to avoid cross-process usage-counter races.
 - Use test data only. Free tiers often let providers use prompts for training, so never put real customer data,
   secrets or confidential partner figures into tasks.
 - A free model can write plausible but wrong code. For anything that moves money, the tests and your own review

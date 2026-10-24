@@ -30,11 +30,20 @@ def load_config() -> dict:
 
 
 def project_dir(name: str) -> Path:
-    return ROOT / "projects" / name
+    if not name or Path(name).name != name or name in {".", ".."}:
+        raise ValueError(f"invalid project name: {name!r}")
+    projects = (ROOT / "projects").resolve()
+    pdir = (projects / name).resolve()
+    if projects not in pdir.parents:
+        raise ValueError(f"project path is outside projects/: {name!r}")
+    return pdir
 
 
 def load_project(name: str) -> dict:
-    pdir = project_dir(name)
+    try:
+        pdir = project_dir(name)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if not pdir.is_dir():
         raise SystemExit(f"Unknown project '{name}': create projects/{name}/ first.")
     meta_path = pdir / "bantu.project.json"
