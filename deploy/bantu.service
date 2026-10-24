@@ -1,0 +1,13 @@
+[Unit]
+Description=BANTU agent daemon
+After=network-online.target docker.service
+
+[Service]
+User=bantu
+WorkingDirectory=/opt/bantu
+ExecStart=/usr/bin/python3 -m bantu daemon
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

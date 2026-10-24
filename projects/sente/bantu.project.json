@@ -1,0 +1,5 @@
+{
+  "test_cmd": "python -m pytest -q",
+  "protected": ["tests/", "SPEC.md", "pytest.ini", "bantu.project.json"],
+  "notes_file": "PROJECT.md"
+}

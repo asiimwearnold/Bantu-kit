@@ -1,0 +1,5 @@
+# Sandbox for JavaScript/TypeScript projects. Build: docker build -t bantu-node -f docker/Dockerfile.node docker/
+# Runs with no network, so anything the agents need must be installed here, at build time.
+FROM node:22-slim
+RUN npm install -g typescript tsx
+WORKDIR /work

@@ -1,0 +1,26 @@
+{
+  "providers": {
+    "gemini":     {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "key_env": "GEMINI_API_KEY",     "rpm": 8,  "daily_tokens": 600000},
+    "cerebras":   {"base_url": "https://api.cerebras.ai/v1",                              "key_env": "CEREBRAS_API_KEY",   "rpm": 20, "daily_tokens": 800000},
+    "mistral":    {"base_url": "https://api.mistral.ai/v1",                               "key_env": "MISTRAL_API_KEY",    "rpm": 30, "daily_tokens": 800000},
+    "groq":       {"base_url": "https://api.groq.com/openai/v1",                          "key_env": "GROQ_API_KEY",       "rpm": 20, "daily_tokens": 150000},
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1",                            "key_env": "OPENROUTER_API_KEY", "rpm": 15, "daily_tokens": 100000}
+  },
+  "pools": {
+    "smart": ["gemini/gemini-2.5-flash", "mistral/mistral-large-latest", "groq/openai/gpt-oss-120b"],
+    "fast":  ["cerebras/gpt-oss-120b", "mistral/codestral-latest", "groq/llama-3.3-70b-versatile"]
+  },
+  "roles": {"planner": "smart", "reviewer": "smart", "coder": "fast", "default": "fast"},
+  "budgets": {
+    "task_tokens": 300000,
+    "subtask_tokens": 90000,
+    "daily_tokens_total": 1200000,
+    "max_steps": 12,
+    "max_fix_attempts": 3,
+    "max_context_chars": 60000
+  },
+  "sandbox": {"mode": "docker", "image": "bantu-sandbox", "network": "none", "timeout_sec": 120,
+              "allow": ["python", "python3", "pytest", "ruff"]},
+  "git": {"mode": "branch"},
+  "review": true
+}

@@ -1,0 +1,7 @@
+{
+  "test_cmd": "node --test",
+  "protected": ["tests/", "SPEC.md", "bantu.project.json"],
+  "notes_file": "PROJECT.md",
+  "default_role": "coder-node",
+  "sandbox": {"image": "bantu-node", "allow": ["node", "npm", "npx", "tsx", "tsc"]}
+}

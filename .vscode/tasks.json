@@ -1,0 +1,16 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label": "BANTU: doctor", "type": "shell", "command": "python -m bantu doctor", "problemMatcher": []},
+    {"label": "BANTU: dry run (zero tokens)", "type": "shell",
+     "command": "python -m bantu run tasks/backlog/000-demo-dry-run.md --mock", "options": {"env": {"BANTU_SANDBOX": "local"}}, "problemMatcher": []},
+    {"label": "BANTU: start daemon", "type": "shell", "command": "python -m bantu daemon", "isBackground": true, "problemMatcher": []},
+    {"label": "BANTU: add task", "type": "shell",
+     "command": "python -m bantu add \"${input:taskText}\" --project ${input:project}", "problemMatcher": []},
+    {"label": "BANTU: status", "type": "shell", "command": "python -m bantu status", "problemMatcher": []}
+  ],
+  "inputs": [
+    {"id": "taskText", "type": "promptString", "description": "What should BANTU do?"},
+    {"id": "project", "type": "promptString", "description": "Project folder name under projects/", "default": "sente"}
+  ]
+}

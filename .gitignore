@@ -1,0 +1,7 @@
+.env
+state/
+runs/
+tasks/running/
+__pycache__/
+.pytest_cache/
+*.pyc
