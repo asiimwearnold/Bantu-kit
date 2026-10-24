@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .agent import AgentResult, run_subagent
-from .config import ROOT, load_project, project_dir
+from .config import ROOT, ensure_project, load_project, projects_root
 from .llm import BudgetExceeded, OutOfBudget, ProviderError, Router
 from .tools import ToolError, Workspace, truncate
 
@@ -48,9 +50,100 @@ def _role_prompt(role: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _git(*args: str) -> tuple[int, str]:
-    r = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
+def _git(cwd: Path, *args: str) -> tuple[int, str]:
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
     return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def _git_root(path: Path) -> Path | None:
+    code, output = _git(path, "rev-parse", "--show-toplevel")
+    if code:
+        return None
+    return Path(output).resolve()
+
+
+def _task_state_path(task_path: Path, project: str) -> Path:
+    identity = f"{project}\0{task_path.name}".encode("utf-8")
+    key = hashlib.sha256(identity).hexdigest()
+    return ROOT / "state" / "task_runs" / f"{key}.json"
+
+
+def _load_task_state(path: Path, repo_root: Path | None) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read task resume state {path}: {exc}") from exc
+    if (
+        not isinstance(state, dict)
+        or state.get("status") != "paused"
+        or not isinstance(state.get("branch"), str)
+        or not state["branch"].startswith("bantu/")
+        or not isinstance(state.get("original"), str)
+        or not state["original"]
+        or state["original"].startswith("-")
+        or not isinstance(state.get("repo_root"), str)
+    ):
+        raise RuntimeError(f"invalid task resume state in {path}")
+    if repo_root is None or Path(state["repo_root"]).resolve() != repo_root.resolve():
+        raise RuntimeError(f"task resume state belongs to a different project repository: {path}")
+    return state
+
+
+def _save_task_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        temporary.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _refresh_branch(branch_root: Path, branch: str) -> tuple[bool, str]:
+    code, remote = _git(branch_root, "remote", "get-url", "origin")
+    if code:
+        return True, ""
+    upstream_code, upstream = _git(
+        branch_root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", f"{branch}@{{upstream}}"
+    )
+    if not upstream_code and not upstream.startswith("origin/"):
+        return False, f"{branch} tracks {upstream}, not origin; configure an origin tracking branch first"
+    code, output = _git(branch_root, "fetch", "origin")
+    if code:
+        return False, f"could not fetch origin: {output}"
+    if upstream_code:
+        upstream = f"refs/remotes/origin/{branch}"
+        code, output = _git(branch_root, "show-ref", "--verify", "--quiet", upstream)
+        if code:
+            return False, f"origin has no tracking branch for {branch}; checkout a tracked base branch first"
+    code, output = _git(branch_root, "merge", "--ff-only", upstream)
+    if code:
+        return False, f"cannot fast-forward {branch} to {upstream}: {output}"
+    return True, ""
+
+
+def _branch_has_commits(branch_root: Path, base: str, branch: str) -> bool:
+    code, output = _git(branch_root, "rev-list", "--count", f"{base}..{branch}")
+    return code == 0 and output.isdigit() and int(output) > 0
+
+
+def _create_pull_request(branch_root: Path, base: str, branch: str, title: str) -> tuple[int, str]:
+    body = (
+        "Prepared by BANTU after the configured acceptance checks and reviewer gate passed. "
+        "Please inspect the diff and CI results before merging."
+    )
+    result = subprocess.run(
+        [
+            "gh", "pr", "create", "--base", base, "--head", branch,
+            "--title", title[:120], "--body", body,
+        ],
+        cwd=branch_root,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode, (result.stdout + result.stderr).strip()
 
 
 def _plan(router: Router, ws: Workspace, brief: str, test_cmd: str, default_role: str) -> list[dict]:
@@ -122,16 +215,51 @@ def _review_outcome(result: AgentResult, review_text: str | None) -> tuple[bool,
     return True, "review passed"
 
 
+def _should_push_task_branch(
+    push_requested: bool, status: str, review_passed: bool, paused: bool
+) -> bool:
+    return push_requested and status == "done" and review_passed and not paused
+
+
 def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
     """Returns 'done', 'failed' or raises OutOfBudget (task stays queued)."""
     head, body = parse_task(task_path.read_text(encoding="utf-8"))
     project = head.get("project", "")
+    repository = head.get("repository")
+    push_value = head.get("push", "false").strip().lower()
+    pr_value = head.get("pr", "false").strip().lower()
+    if push_value not in {"true", "false"} or pr_value not in {"true", "false"}:
+        raise SystemExit("Task headers 'push' and 'pr' must be 'true' or 'false'.")
+    pr_requested = pr_value == "true"
+    push_requested = push_value == "true" or pr_requested
+    if push_requested and cfg.get("git", {}).get("mode", "branch") != "branch":
+        raise SystemExit("Task header 'push: true' requires git mode 'branch'.")
+    if push_requested and not cfg.get("review", True):
+        raise SystemExit("Task branch publishing requires the reviewer gate to be enabled.")
+    if pr_requested:
+        if not shutil.which("gh"):
+            raise SystemExit("Task header 'pr: true' requires GitHub CLI (gh) to be installed.")
+        auth = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True)
+        if auth.returncode:
+            raise SystemExit("Task header 'pr: true' requires an authenticated GitHub CLI session (run gh auth login).")
     if mock and not project.startswith("demo"):
         raise SystemExit("--mock only runs against the demo projects (scripted replies would write junk elsewhere).")
+    pdir = ensure_project(project, repository)
     meta = load_project(project)
     pcfg = {**cfg, "sandbox": {**cfg["sandbox"], **meta.get("sandbox", {})}}   # per-project language/toolchain
     default_role = meta.get("default_role", "coder")
-    pdir = project_dir(project)
+    external_projects = projects_root() != (ROOT / "projects").resolve()
+    if push_requested and not external_projects:
+        raise SystemExit("Task header 'push: true' is only supported for projects outside the BANTU repository.")
+    repo_root = _git_root(pdir)
+    if external_projects and cfg.get("git", {}).get("mode", "branch") == "branch":
+        if repo_root is None:
+            raise SystemExit(f"External project must be a Git repository: {pdir}")
+        if repo_root != pdir:
+            raise SystemExit(
+                f"External project must be the root of its own Git repository: {pdir} "
+                f"(detected repository root: {repo_root})"
+            )
     task_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + re.sub(r"[^a-z0-9]+", "-", task_path.stem.lower())[:30]
     run_dir = ROOT / "runs" / task_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -148,31 +276,139 @@ def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
     log(f"BANTU task {task_id} (project {project}, budget {limit} tokens)")
 
     branch, original = None, None
-    if cfg.get("git", {}).get("mode", "branch") == "branch" and (ROOT / ".git").exists():
-        if _git("status", "--porcelain")[1] == "":
-            original = _git("rev-parse", "--abbrev-ref", "HEAD")[1]
-            branch = f"bantu/{task_id}"
-            _git("checkout", "-b", branch)
-        else:
-            log("  note: working tree not clean, so BANTU will not create a git branch for this run")
-
-    results: list[SubResult] = []
+    committed = False
     status, paused = "done", False
-    try:
-        subs = parse_subtasks(body)
-        if subs is None:
-            log("  no explicit subtasks; asking the planner")
-            subs = _plan(router, ws, body, meta["test_cmd"], default_role)
-        for st in subs:
-            st.setdefault("role", default_role)
-            r = _run_sub(router, ws, cfg, st, meta["test_cmd"], log)
-            results.append(r)
-            if not r.ok:
+    review_passed = False
+    branch_root = None
+    state_path = _task_state_path(task_path, project)
+    resume_state = _load_task_state(state_path, repo_root)
+    if cfg.get("git", {}).get("mode", "branch") == "branch" and repo_root is not None:
+        branch_root = repo_root
+        code, dirty = _git(branch_root, "status", "--porcelain")
+        if code:
+            log(f"  git setup failed: {dirty}")
+            status = "failed"
+        elif dirty and external_projects:
+            current_branch = _git(branch_root, "rev-parse", "--abbrev-ref", "HEAD")[1]
+            if not resume_state or current_branch != resume_state["branch"]:
+                log("  git setup failed: external project working tree is not clean; commit or stash changes first")
                 status = "failed"
-                break
+            else:
+                code, output = _git(branch_root, "add", "-A", "--", pdir.relative_to(branch_root).as_posix())
+                if code:
+                    log(f"  resume checkpoint failed to stage interrupted changes: {output}")
+                    status = "failed"
+                else:
+                    code, output = _git(branch_root, "commit", "-m", f"BANTU: checkpoint {task_path.stem}")
+                    if code:
+                        log(f"  resume checkpoint failed to commit interrupted changes: {output}")
+                        status = "failed"
+                    else:
+                        log(f"  checkpointed interrupted changes on `{current_branch}`")
+        elif dirty:
+            log("  note: working tree not clean, so BANTU will not create a git branch for this run")
+        if status == "done" and resume_state:
+            original = resume_state["original"]
+            branch = resume_state["branch"]
+            code, output = _git(branch_root, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+            if code:
+                log(f"  resume failed: task branch '{branch}' does not exist")
+                status = "failed"
+                branch = None
+            else:
+                code, current_branch = _git(branch_root, "rev-parse", "--abbrev-ref", "HEAD")
+                if code:
+                    log(f"  resume failed: {output}")
+                    status = "failed"
+                    branch = None
+                else:
+                    if current_branch != original:
+                        code, output = _git(branch_root, "checkout", original)
+                    else:
+                        code, output = 0, ""
+                    if code:
+                        log(f"  resume failed: {output}")
+                        status = "failed"
+                        branch = None
+                    else:
+                        ok, output = _refresh_branch(branch_root, original)
+                        if not ok:
+                            log(f"  resume failed: {output}")
+                            status = "failed"
+                            branch = None
+                        else:
+                            code, output = _git(branch_root, "checkout", branch)
+                            if code:
+                                log(f"  resume failed: {output}")
+                                status = "failed"
+                                branch = None
+                            else:
+                                code, output = _git(branch_root, "rebase", original)
+                                if code:
+                                    _git(branch_root, "rebase", "--abort")
+                                    _git(branch_root, "checkout", original)
+                                    log(f"  resume failed: task branch could not be rebased onto {original}: {output}")
+                                    status = "failed"
+                                    branch = None
+                                else:
+                                    log(f"  resuming task branch `{branch}`")
+        elif status == "done" and not dirty:
+            code, original_name = _git(branch_root, "rev-parse", "--abbrev-ref", "HEAD")
+            if code:
+                log(f"  git setup failed: {original_name}")
+                status = "failed"
+            else:
+                original = original_name
+                ok, output = _refresh_branch(branch_root, original)
+                if not ok:
+                    log(f"  git setup failed: {output}")
+                    status = "failed"
+                    original = None
+                else:
+                    branch = f"bantu/{task_id}"
+                    code, output = _git(branch_root, "checkout", "-b", branch)
+                    if code:
+                        log(f"  git setup failed: {output}")
+                        branch = None
+                        status = "failed"
+                    else:
+                        _save_task_state(
+                            state_path,
+                            {
+                                "project": project, "repo_root": str(branch_root),
+                                "original": original, "branch": branch, "status": "paused",
+                            },
+                        )
+    if push_requested and branch is None:
+        status = "failed"
+        log("  git push unavailable: could not create a clean task branch")
+    results: list[SubResult] = []
+    try:
+        if status == "done":
+            subs = parse_subtasks(body)
+            if subs is None:
+                log("  no explicit subtasks; asking the planner")
+                subs = _plan(router, ws, body, meta["test_cmd"], default_role)
+            for st in subs:
+                st.setdefault("role", default_role)
+                r = _run_sub(router, ws, cfg, st, meta["test_cmd"], log)
+                results.append(r)
+                if not r.ok:
+                    status = "failed"
+                    break
+        if status == "done" and branch:
+            code, changed_output = _git(branch_root, "diff", "--name-only", f"{original}...{branch}")
+            if code:
+                status = "failed"
+                log(f"  REVIEW FAILED: could not list task branch changes: {changed_output}")
+            else:
+                changed_files = {f for r in results for f in r.files}
+                changed_files.update(changed_output.splitlines())
+        else:
+            changed_files = {f for r in results for f in r.files}
         if status == "done" and cfg.get("review", True):
             rev_ws = Workspace(pdir, pcfg, protected=meta["protected"], writable=["REVIEW.md"])
-            changed = sorted({f for r in results for f in r.files})[:8]
+            changed = sorted(changed_files)[:8]
             router.begin_sub(cfg["budgets"]["subtask_tokens"])
             try:
                 review_result = run_subagent(
@@ -194,8 +430,11 @@ def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
                     log(f"  REVIEW {'PASSED' if review_ok else 'FAILED'}: {review_note}")
                     if not review_ok:
                         status = "failed"
+                    else:
+                        review_passed = True
     except OutOfBudget as exc:
         paused = True
+        status = "paused"
         log(f"  PAUSED: {exc}")
     except (BudgetExceeded, ProviderError) as exc:
         status = "failed"
@@ -204,12 +443,66 @@ def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
     # ---- git + report ------------------------------------------------------
     commit_note = ""
     if branch:
-        _git("add", "-A", str(pdir.relative_to(ROOT)))
-        if _git("status", "--porcelain")[1]:
-            _git("commit", "-m", f"BANTU: {task_path.stem} ({status})")
-            commit_note = (f"Committed on branch `{branch}`. Review: `git diff {original}..{branch}`. "
-                           f"Accept: `git merge {branch}`.")
-        _git("checkout", original)
+        project_path = pdir.relative_to(branch_root).as_posix() or "."
+        code, output = _git(branch_root, "add", "-A", "--", project_path)
+        if code:
+            status = "failed"
+            log(f"  git stage failed: {output}")
+        else:
+            code, changes = _git(branch_root, "status", "--porcelain")
+            if code:
+                status = "failed"
+                log(f"  git status failed: {changes}")
+            elif changes:
+                code, output = _git(branch_root, "commit", "-m", f"BANTU: {task_path.stem} ({status})")
+                if code:
+                    status = "failed"
+                    log(f"  git commit failed: {output}")
+                else:
+                    committed = True
+                    commit_note = (
+                        f"Committed on branch `{branch}` in `{branch_root}`. "
+                        f"Review: `git -C \"{branch_root}\" diff {original}..{branch}`. "
+                        f"Accept: `git -C \"{branch_root}\" merge {branch}`."
+                    )
+        if _should_push_task_branch(push_requested, status, review_passed, paused):
+            if not committed and not _branch_has_commits(branch_root, original, branch):
+                status = "failed"
+                log("  git push failed: no task changes were committed to the run branch")
+            else:
+                code, output = _git(branch_root, "push", "--set-upstream", "origin", branch)
+                if code:
+                    status = "failed"
+                    log(f"  git push failed: {output}")
+                else:
+                    log(f"  pushed branch `{branch}` to origin (default branch was not changed)")
+                    commit_note += f" Pushed to `origin/{branch}`."
+                    if pr_requested:
+                        title = f"BANTU: {body.strip().splitlines()[0] if body.strip() else task_path.stem}"
+                        code, output = _create_pull_request(branch_root, original, branch, title)
+                        if code:
+                            status = "failed"
+                            log(f"  pull request creation failed: {output}")
+                        else:
+                            log(f"  pull request created: {output}")
+                            commit_note += f" Pull request: {output}."
+        elif push_requested:
+            log("  git push skipped: task did not complete with a passing reviewer verdict")
+        if original:
+            code, output = _git(branch_root, "checkout", original)
+            if code:
+                status = "failed"
+                log(f"  git checkout failed; run remains on branch `{branch}`: {output}")
+    if paused and branch and original:
+        _save_task_state(
+            state_path,
+            {
+                "project": project, "repo_root": str(branch_root),
+                "original": original, "branch": branch, "status": "paused",
+            },
+        )
+    elif not paused:
+        state_path.unlink(missing_ok=True)
     rows = "\n".join(f"| {r.id} | {r.role} | {'ok' if r.ok else 'FAILED'} | {r.attempts} | {r.note.splitlines()[0][:90] if r.note else ''} |" for r in results)
     models = "\n".join(f"- {m}: {t:,} tokens" for m, t in router.by_model.items()) or "- none"
     report = (f"# BANTU report: {task_id}\n\nStatus: **{'paused (out of budget)' if paused else status}**\n\n"

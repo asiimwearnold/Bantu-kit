@@ -11,7 +11,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from .config import ROOT, load_config
+from .config import ROOT, load_config, projects_root
 
 
 def cmd_run(args, cfg):
@@ -35,7 +35,15 @@ def cmd_add(args, cfg):
     inbox.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "-", args.text.lower())[:40].strip("-") or "task"
     path = inbox / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{slug}.md"
-    head = f"project: {args.project}\n" + (f"budget_tokens: {args.budget}\n" if args.budget else "")
+    head = f"project: {args.project}\n"
+    if args.repository:
+        head += f"repository: {args.repository}\n"
+    if args.push:
+        head += "push: true\n"
+    if args.pr:
+        head += "pr: true\n"
+    if args.budget:
+        head += f"budget_tokens: {args.budget}\n"
     path.write_text(f"{head}---\n{args.text}\n", encoding="utf-8")
     print(f"Queued {path.relative_to(ROOT)}")
 
@@ -82,6 +90,26 @@ def cmd_doctor(args, cfg):
     keys = [n for n, p in cfg["providers"].items() if os.environ.get(p.get("key_env", ""))]
     check("at least one provider key set", keys, "copy .env.example to .env and add a key")
     print("     providers with keys:", ", ".join(keys) or "none")
+    project_root = projects_root()
+    images = {}
+    if not project_root.is_dir():
+        print(f"WARN projects root '{project_root}' does not exist")
+    else:
+        for meta in sorted(project_root.glob("*/bantu.project.json")):
+            img = json.loads(meta.read_text()).get("sandbox", {}).get("image")
+            if img:
+                images[img] = meta.parent.name
+            if project_root != (ROOT / "projects").resolve() and cfg.get("git", {}).get("mode", "branch") == "branch":
+                repo = subprocess.run(
+                    ["git", "-C", str(meta.parent), "rev-parse", "--show-toplevel"],
+                    capture_output=True, text=True,
+                )
+                repo_root = Path(repo.stdout.strip()).resolve() if repo.returncode == 0 else None
+                check(
+                    f"external project '{meta.parent.name}' is its own Git repository",
+                    repo_root == meta.parent.resolve(),
+                    f"initialize Git at '{meta.parent}' and commit a clean baseline",
+                )
     if cfg["sandbox"]["mode"] == "docker":
         has = shutil.which("docker")
         check("docker installed", has, "install Docker Desktop, or set BANTU_SANDBOX=local (less safe)")
@@ -89,11 +117,6 @@ def cmd_doctor(args, cfg):
             r = subprocess.run(["docker", "image", "inspect", cfg["sandbox"]["image"]], capture_output=True)
             check(f"sandbox image '{cfg['sandbox']['image']}' built", r.returncode == 0,
                   "docker build -t bantu-sandbox -f docker/Dockerfile.sandbox docker/")
-        images = {}
-        for meta in sorted((ROOT / "projects").glob("*/bantu.project.json")):
-            img = json.loads(meta.read_text()).get("sandbox", {}).get("image")
-            if img:
-                images[img] = meta.parent.name
         for img, proj in images.items():
             if has:
                 r = subprocess.run(["docker", "image", "inspect", img], capture_output=True)
@@ -117,6 +140,9 @@ def main():
     p = sub.add_parser("add", help="queue a task from text")
     p.add_argument("text")
     p.add_argument("--project", required=True)
+    p.add_argument("--repository", help="clone or verify this Git remote URL")
+    p.add_argument("--push", action="store_true", help="push the task branch to origin after review passes")
+    p.add_argument("--pr", action="store_true", help="push the reviewed branch and open a pull request (requires gh)")
     p.add_argument("--budget", type=int)
     p.set_defaults(fn=cmd_add)
     for name, fn, helptext in (("status", cmd_status, "token usage and queue"),

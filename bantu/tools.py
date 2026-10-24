@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules", ".venv"}
 SECRET_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+SANDBOX_IGNORES = shutil.ignore_patterns(
+    ".git", ".env", ".env.*", ".venv", "__pycache__", ".pytest_cache", "node_modules"
+)
 
 
 class ToolError(Exception):
@@ -66,7 +71,10 @@ class Workspace:
         if p != self.root and self.root not in p.parents:
             raise ToolError(f"path outside workspace: {rel}")
         posix = p.relative_to(self.root).as_posix()
-        if any(part in {".git", ".env"} for part in p.relative_to(self.root).parts):
+        if any(
+            part == ".git" or part == ".env" or part.startswith(".env.")
+            for part in p.relative_to(self.root).parts
+        ):
             raise ToolError(f"path not allowed: {rel}")
         return p, posix
 
@@ -94,6 +102,8 @@ class Workspace:
         for dirpath, dirs, files in os.walk(self.root):
             dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
             for f in sorted(files):
+                if f == ".env" or f.startswith(".env."):
+                    continue
                 out.append(Path(dirpath, f).relative_to(self.root).as_posix())
         more = f"\n(+{len(out) - max_files} more)" if len(out) > max_files else ""
         return "\n".join(out[:max_files]) + more if out else "(empty)"
@@ -108,26 +118,42 @@ class Workspace:
             return 2, "empty command"
         if argv[0] not in sb["allow"]:
             return 2, f"command not allowed: {argv[0]} (allowed: {', '.join(sb['allow'])})"
-        if sb["mode"] == "docker":
-            full = ["docker", "run", "--rm", "--network", sb.get("network", "none"), "--memory", "512m",
-                    "--cpus", "1", "--pids-limit", "256", "-v", f"{self.root}:/work", "-w", "/work",
-                    "-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "PYTEST_ADDOPTS=-p no:cacheprovider", "-e", "HOME=/tmp"]
-            if hasattr(os, "getuid"):
-                full += ["--user", f"{os.getuid()}:{os.getgid()}"]
-            full += [sb["image"]] + argv
-            env = None
-        else:
+        if sb["mode"] != "docker":
             for a in argv[1:]:
                 if a == "-c" or ".." in a or a.startswith("/") or (len(a) > 1 and a[1] == ":"):
                     return 2, f"argument not allowed in local mode: {a}"
-            full = argv
-            env = {k: v for k, v in os.environ.items() if not any(h in k.upper() for h in SECRET_HINTS)}
-            env["PYTHONDONTWRITEBYTECODE"] = "1"
-        try:
-            r = subprocess.run(full, cwd=self.root, capture_output=True, text=True,
-                               timeout=sb.get("timeout_sec", 120), env=env)
-        except subprocess.TimeoutExpired:
-            return 124, "command timed out"
-        except FileNotFoundError as exc:
-            return 127, f"cannot start command: {exc}"
-        return r.returncode, truncate((r.stdout + r.stderr).strip() or "(no output)")
+
+        with tempfile.TemporaryDirectory(prefix="bantu-check-") as tempdir:
+            work_root = Path(tempdir) / "work"
+            shutil.copytree(self.root, work_root, ignore=SANDBOX_IGNORES, symlinks=True)
+            if sb["mode"] == "docker":
+                full = [
+                    "docker", "run", "--rm", "--network", sb.get("network", "none"),
+                    "--memory", "512m", "--cpus", "1", "--pids-limit", "256",
+                    "-v", f"{work_root}:/work", "-w", "/work",
+                    "-e", "PYTHONDONTWRITEBYTECODE=1",
+                    "-e", "PYTEST_ADDOPTS=-p no:cacheprovider",
+                    "-e", "HOME=/tmp", sb["image"], *argv,
+                ]
+                if hasattr(os, "getuid"):
+                    full[full.index(sb["image"]):full.index(sb["image"])] = [
+                        "--user", f"{os.getuid()}:{os.getgid()}"
+                    ]
+                env = None
+            else:
+                full = argv
+                env = {
+                    k: v for k, v in os.environ.items()
+                    if not any(h in k.upper() for h in SECRET_HINTS)
+                }
+                env["PYTHONDONTWRITEBYTECODE"] = "1"
+            try:
+                r = subprocess.run(
+                    full, cwd=work_root, capture_output=True, text=True,
+                    timeout=sb.get("timeout_sec", 120), env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return 124, "command timed out"
+            except FileNotFoundError as exc:
+                return 127, f"cannot start command: {exc}"
+            return r.returncode, truncate((r.stdout + r.stderr).strip() or "(no output)")

@@ -50,12 +50,54 @@ them to match your account.
 
 ## Build the Sente prototype
 
+The steps below use the bundled project when `BANTU_PROJECTS_ROOT` is unset. For a separate Sente repository,
+follow [Run projects from separate repositories](#run-projects-from-separate-repositories) and queue tasks with
+`project: sente` and the repository URL.
+
 1. Run the first task now: `python -m bantu run tasks/backlog/001-sente-rules-and-service.md`
    (or move it into `tasks/inbox/` and start `python -m bantu daemon`).
 2. Open the Source Control view. The work is on a branch named `bantu/<task-id>`. Read the diff and
    `projects/sente/REVIEW.md`, then merge it (`git merge bantu/<task-id>`) or discard it.
 3. Merge before starting 002 and 003, because they build on 001. The acceptance tests are in
    `projects/sente/tests/` and agents cannot edit them. 003 has no oracle tests: review it yourself.
+
+## Run projects from separate repositories
+
+BANTU can use external product repositories without adding their files or task branches to the BANTU repository:
+
+1. Set `BANTU_PROJECTS_ROOT=C:\work\bantu-projects` in BANTU's local `.env` (or environment). This is a parent
+   directory where BANTU will keep separate product repositories.
+2. Give a task a project slug and repository link, for example:
+   `python -m bantu add "Review the codebase and propose safe improvements" --project sente --repository https://github.com/your-org/sente.git --push`
+   Omit `--push` to keep the resulting task branch local. BANTU clones the URL on first use; later tasks reuse
+   that clone and verify that its `origin` matches the requested repository.
+3. Ensure Git credentials are configured on the machine using SSH keys or a credential manager. Do not embed
+   tokens or passwords in repository URLs.
+4. Put `bantu.project.json` in the product repo to define its test command, protected files, role, and sandbox.
+   Use `python -m bantu doctor` to check that configured external projects are independent Git repositories.
+
+When configured, this root replaces the bundled `projects/` directory for task lookup. The BANTU host process
+performs clone, commit, and explicitly requested push operations using the host's Git credentials; model prompts
+and test containers do not receive those credentials. Before branching, BANTU fetches `origin` and fast-forwards
+the current base branch when possible; divergent branches are refused rather than rewritten. Existing product
+clones must have a clean working tree before a run.
+
+Every acceptance or agent-requested command runs against a disposable project copy that excludes `.git`, `.env*`
+configuration files, virtual environments and common caches. The copy is discarded after each command, so tests
+cannot modify the host checkout or Git metadata. Docker mode adds resource limits and no network by default. Local
+mode still runs arbitrary allowed executables on the host and is not a security boundary; use Docker for untrusted
+repositories.
+
+BANTU creates a `bantu/<task-id>` branch, commits there, and returns to its starting branch. With `--push` or
+`push: true` in the task header, it pushes only that branch after acceptance checks and the reviewer gate pass.
+It never force-pushes or writes directly to the default branch. If a provider runs out, BANTU commits the current
+branch locally and records resume state; rerunning the same task file resumes that branch, fast-forwards its base,
+and rebases the task commits before continuing. A failed push leaves the local task branch available for retry.
+
+To also open a pull request, use `python -m bantu add "Add a feature" --project sente --repository <url> --pr`.
+This requires the GitHub CLI (`gh`) to be installed and authenticated. BANTU creates the PR only after acceptance
+and review pass; it does not merge or deploy. Task files, run reports, usage counters, and BANTU's role prompts
+remain in the BANTU repository. Only one BANTU daemon can own a task queue at a time.
 
 ## Give BANTU new work
 
@@ -130,7 +172,8 @@ Any small Linux VPS works; BANTU itself uses almost no CPU. The limit is your to
 - Commands are limited to `python`, `pytest`, `ruff`, run in a container with no network, 512 MB and 1 CPU.
   `BANTU_SANDBOX=local` removes that container and runs commands on the host; it is not a security boundary
   and should be limited to disposable dry runs.
-- Agents never see your API keys, never push or merge. You review every branch.
+- Models never receive provider keys or Git credentials. BANTU only pushes a product branch when the task
+  explicitly requests it; it never force-pushes or merges to the default branch. You review and merge every branch.
 - With review enabled, a task is marked successful only when the reviewer writes `REVIEW.md` with
   `Verdict: pass`. A missing, unfinished, or `needs work` review fails the task; inspect the report and branch
   before accepting changes.

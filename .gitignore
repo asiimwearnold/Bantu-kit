@@ -2,6 +2,7 @@
 state/
 runs/
 tasks/running/
+tasks/.daemon.lock
 __pycache__/
 .pytest_cache/
 *.pyc
