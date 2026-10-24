@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import http.client
 import json
 import os
 import re
@@ -26,7 +27,9 @@ class ProviderError(Exception):
 
 
 class _Retryable(Exception):
-    pass
+    def __init__(self, msg: str, wait: int = 60):
+        super().__init__(msg)
+        self.wait = wait
 
 
 def _today() -> str:
@@ -71,7 +74,8 @@ class Router:
         self.sub_tokens, self.sub_limit = 0, limit
 
     # ---- public API -------------------------------------------------------
-    def chat(self, role: str, messages: list[dict], max_tokens: int = 4096) -> str:
+    def chat(self, role: str, messages: list[dict], max_tokens: int | None = None) -> str:
+        max_tokens = max_tokens or self.cfg["budgets"].get("max_output_tokens", 6000)
         self._load()
         if self.task_limit and self.task_tokens >= self.task_limit:
             raise BudgetExceeded(f"task budget of {self.task_limit} tokens reached")
@@ -90,7 +94,7 @@ class Router:
         problems: list[str] = []
         fatal: list[str] = []
         any_wait = False
-        for _ in range(3):
+        for _ in range(4):
             waiting = False
             for ref in refs:
                 prov, model = ref.split("/", 1)
@@ -109,7 +113,7 @@ class Router:
                 try:
                     text, tokens = self._call(p, model, key, messages, max_tokens)
                 except _Retryable as exc:
-                    self.cooldown[prov] = time.time() + 60
+                    self.cooldown[prov] = time.time() + exc.wait
                     problems.append(f"{ref}: {exc}")
                     waiting = any_wait = True
                     continue
@@ -123,9 +127,10 @@ class Router:
                 return text
             if not waiting:
                 break
-            time.sleep(20)
+            ahead = [t - time.time() for t in self.cooldown.values() if t > time.time()]
+            time.sleep(max(1, min(min(ahead, default=5), 30)))
         if fatal and not any_wait:
-            raise ProviderError("; ".join(fatal[-3:]) + "  -> check model names with: python -m bantu models")
+            raise ProviderError("; ".join(fatal[-3:]) + "  -> check the model name and API key (python -m bantu models)")
         raise OutOfBudget("no provider available. " + "; ".join(problems[-3:]))
 
     # ---- internals --------------------------------------------------------
@@ -144,19 +149,23 @@ class Router:
 
     @staticmethod
     def _call(p: dict, model: str, key: str, messages: list[dict], max_tokens: int) -> tuple[str, int]:
-        body = json.dumps({"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.2}).encode()
+        payload = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.2}
+        payload.update(p.get("extra_body", {}))          # e.g. {"reasoning_effort": "low"} for Gemini
+        body = json.dumps(payload).encode()
         req = urllib.request.Request(
             p["base_url"].rstrip("/") + "/chat/completions", data=body,
             headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
         try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            with urllib.request.urlopen(req, timeout=p.get("timeout_sec", 240)) as resp:
                 data = json.load(resp)
         except urllib.error.HTTPError as exc:
             if exc.code in (429, 500, 502, 503, 504):
                 raise _Retryable(f"HTTP {exc.code}") from exc
             raise RuntimeError(f"HTTP {exc.code}: {exc.read()[:200]!r}") from exc
         except urllib.error.URLError as exc:
-            raise _Retryable(str(exc.reason)) from exc
+            raise _Retryable(str(exc.reason), wait=15) from exc
+        except (TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+            raise _Retryable(f"network: {exc or type(exc).__name__}", wait=10) from exc
         text = (data["choices"][0]["message"].get("content") or "")
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
         tokens = (data.get("usage") or {}).get("total_tokens") or (sum(len(m["content"]) for m in messages) + len(text)) // 4
