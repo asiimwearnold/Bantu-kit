@@ -1,0 +1,6 @@
+  {
+  "pools": {
+    "smart": ["gemini/gemini-2.5-flash", "mistral/mistral-large-latest", "groq/openai/gpt-oss-120b"],
+    "fast": ["cerebras/gpt-oss-120b", "mistral/codestral-latest", "groq/llama-3.3-70b-versatile"]
+  }
+}

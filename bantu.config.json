@@ -6,10 +6,11 @@
     "groq":       {"base_url": "https://api.groq.com/openai/v1",                          "key_env": "GROQ_API_KEY",       "rpm": 20, "daily_tokens": 150000},
     "openrouter": {"base_url": "https://openrouter.ai/api/v1",                            "key_env": "OPENROUTER_API_KEY", "rpm": 15, "daily_tokens": 100000}
   },
+
   "pools": {
-    "smart": ["gemini/gemini-2.5-flash", "mistral/mistral-large-latest", "groq/openai/gpt-oss-120b"],
-    "fast":  ["cerebras/gpt-oss-120b", "mistral/codestral-latest", "groq/llama-3.3-70b-versatile"]
-  },
+  "smart": ["gemini/gemini-2.5-flash"],
+  "fast":  ["gemini/gemini-2.5-flash"]
+},
   "roles": {"planner": "smart", "reviewer": "smart", "coder": "fast", "default": "fast"},
   "budgets": {
     "task_tokens": 300000,
