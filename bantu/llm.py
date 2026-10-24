@@ -21,6 +21,10 @@ class BudgetExceeded(Exception):
     """A per-task or per-subtask token limit was reached."""
 
 
+class ProviderError(Exception):
+    """Every provider failed with a non-retryable error (bad model name, bad key). Fix the config."""
+
+
 class _Retryable(Exception):
     pass
 
@@ -84,6 +88,8 @@ class Router:
         pool = self.cfg["roles"].get(role, self.cfg["roles"].get("default", "fast"))
         refs = self.cfg["pools"][pool]
         problems: list[str] = []
+        fatal: list[str] = []
+        any_wait = False
         for _ in range(3):
             waiting = False
             for ref in refs:
@@ -95,7 +101,7 @@ class Router:
                 if self.state["providers"].get(prov, {}).get("tokens", 0) >= p.get("daily_tokens", 10**12):
                     continue
                 if self.cooldown.get(prov, 0) > time.time():
-                    waiting = True
+                    waiting = any_wait = True
                     continue
                 pause = self.last_call.get(prov, 0) + 60.0 / max(p.get("rpm", 10), 1) - time.time()
                 if pause > 0:
@@ -105,11 +111,12 @@ class Router:
                 except _Retryable as exc:
                     self.cooldown[prov] = time.time() + 60
                     problems.append(f"{ref}: {exc}")
-                    waiting = True
+                    waiting = any_wait = True
                     continue
                 except Exception as exc:  # noqa: BLE001 - provider errors must never crash a run
                     self.cooldown[prov] = time.time() + 300
                     problems.append(f"{ref}: {exc}")
+                    fatal.append(f"{ref}: {exc}")
                     continue
                 self.last_call[prov] = time.time()
                 self._account(prov, model, role, tokens)
@@ -117,6 +124,8 @@ class Router:
             if not waiting:
                 break
             time.sleep(20)
+        if fatal and not any_wait:
+            raise ProviderError("; ".join(fatal[-3:]) + "  -> check model names with: python -m bantu models")
         raise OutOfBudget("no provider available. " + "; ".join(problems[-3:]))
 
     # ---- internals --------------------------------------------------------

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .agent import run_subagent
 from .config import ROOT, load_project, project_dir
-from .llm import BudgetExceeded, OutOfBudget, Router
+from .llm import BudgetExceeded, OutOfBudget, ProviderError, Router
 from .tools import Workspace, truncate
 
 
@@ -172,7 +172,7 @@ def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
     except OutOfBudget as exc:
         paused = True
         log(f"  PAUSED: {exc}")
-    except BudgetExceeded as exc:
+    except (BudgetExceeded, ProviderError) as exc:
         status = "failed"
         log(f"  STOPPED: {exc}")
 
