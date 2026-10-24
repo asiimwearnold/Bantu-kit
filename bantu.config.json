@@ -8,8 +8,8 @@
   },
 
   "pools": {
-  "smart": ["gemini/gemini-2.5-flash"],
-  "fast":  ["gemini/gemini-2.5-flash"]
+  "smart": ["gemini/gemini-2.8-flash"],
+  "fast":  ["gemini/gemini-2.8-flash"]
 },
   "roles": {"planner": "smart", "reviewer": "smart", "coder": "fast", "default": "fast"},
   "budgets": {
