@@ -68,6 +68,13 @@ def _task_state_path(task_path: Path, project: str) -> Path:
     return ROOT / "state" / "task_runs" / f"{key}.json"
 
 
+def _project_config(cfg: dict, meta: dict, external_projects: bool) -> dict:
+    sandbox = dict(cfg["sandbox"])
+    if not external_projects:
+        sandbox.update(meta.get("sandbox", {}))
+    return {**cfg, "sandbox": sandbox}
+
+
 def _load_task_state(path: Path, repo_root: Path | None) -> dict | None:
     if not path.exists():
         return None
@@ -99,6 +106,67 @@ def _save_task_state(path: Path, state: dict) -> None:
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _restore_subtask_checkpoint(
+    state: dict, default_role: str
+) -> tuple[list[dict] | None, dict[str, dict]]:
+    subtasks = state.get("subtasks")
+    if subtasks is not None:
+        if not isinstance(subtasks, list):
+            raise RuntimeError("invalid task resume state: subtasks must be a list")
+        seen_ids = set()
+        for index, subtask in enumerate(subtasks, start=1):
+            if not isinstance(subtask, dict) or not isinstance(subtask.get("goal"), str):
+                raise RuntimeError(f"invalid task resume state: subtask {index} is malformed")
+            subtask_id = subtask.get("id", f"s{index}")
+            if not isinstance(subtask_id, str) or not subtask_id:
+                raise RuntimeError(f"invalid task resume state: subtask {index} has an invalid id")
+            role = subtask.get("role", default_role)
+            read_files = subtask.get("read", [])
+            acceptance = subtask.get("acceptance", "")
+            if (
+                not isinstance(role, str)
+                or not role
+                or not isinstance(read_files, list)
+                or any(not isinstance(path, str) for path in read_files)
+                or not isinstance(acceptance, str)
+            ):
+                raise RuntimeError(f"invalid task resume state: subtask {index} is malformed")
+            if subtask_id in seen_ids:
+                raise RuntimeError(f"invalid task resume state: duplicate subtask id {subtask_id}")
+            seen_ids.add(subtask_id)
+            subtask["id"] = subtask_id
+            subtask["role"] = role
+    completed = state.get("completed_subtasks", [])
+    if not isinstance(completed, list):
+        raise RuntimeError("invalid task resume state: completed_subtasks must be a list")
+    known_ids = {subtask["id"] for subtask in subtasks or []}
+    completed_by_id = {}
+    for item in completed:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), str)
+            or item["id"] not in known_ids
+            or not isinstance(item.get("role", default_role), str)
+            or not isinstance(item.get("note", ""), str)
+            or not isinstance(item.get("attempts", 1), int)
+            or isinstance(item.get("attempts", 1), bool)
+            or item.get("attempts", 1) < 1
+            or not isinstance(item.get("files", []), list)
+            or any(not isinstance(path, str) for path in item.get("files", []))
+        ):
+            raise RuntimeError("invalid task resume state: completed subtask result is malformed")
+        if item["id"] in completed_by_id:
+            raise RuntimeError(f"invalid task resume state: duplicate completed subtask {item['id']}")
+        completed_by_id[item["id"]] = {
+            "id": item["id"],
+            "role": item.get("role", default_role),
+            "note": item.get("note", ""),
+            "attempts": item.get("attempts", 1),
+            "files": item.get("files", []),
+        }
+    return subtasks, completed_by_id
 
 
 def _refresh_branch(branch_root: Path, branch: str) -> tuple[bool, str]:
@@ -246,9 +314,9 @@ def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
         raise SystemExit("--mock only runs against the demo projects (scripted replies would write junk elsewhere).")
     pdir = ensure_project(project, repository)
     meta = load_project(project)
-    pcfg = {**cfg, "sandbox": {**cfg["sandbox"], **meta.get("sandbox", {})}}   # per-project language/toolchain
-    default_role = meta.get("default_role", "coder")
     external_projects = projects_root() != (ROOT / "projects").resolve()
+    pcfg = _project_config(cfg, meta, external_projects)
+    default_role = meta.get("default_role", "coder")
     if push_requested and not external_projects:
         raise SystemExit("Task header 'push: true' is only supported for projects outside the BANTU repository.")
     repo_root = _git_root(pdir)
@@ -282,6 +350,7 @@ def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
     branch_root = None
     state_path = _task_state_path(task_path, project)
     resume_state = _load_task_state(state_path, repo_root)
+    task_state = dict(resume_state or {})
     if cfg.get("git", {}).get("mode", "branch") == "branch" and repo_root is not None:
         branch_root = repo_root
         code, dirty = _git(branch_root, "status", "--porcelain")
@@ -372,12 +441,18 @@ def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
                         branch = None
                         status = "failed"
                     else:
+                        task_state = {
+                            "project": project,
+                            "repo_root": str(branch_root),
+                            "original": original,
+                            "branch": branch,
+                            "status": "paused",
+                            "subtasks": None,
+                            "completed_subtasks": [],
+                        }
                         _save_task_state(
                             state_path,
-                            {
-                                "project": project, "repo_root": str(branch_root),
-                                "original": original, "branch": branch, "status": "paused",
-                            },
+                            task_state,
                         )
     if push_requested and branch is None:
         status = "failed"
@@ -385,17 +460,50 @@ def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
     results: list[SubResult] = []
     try:
         if status == "done":
-            subs = parse_subtasks(body)
+            subs = task_state.get("subtasks")
+            if not isinstance(subs, list):
+                subs = parse_subtasks(body)
             if subs is None:
                 log("  no explicit subtasks; asking the planner")
                 subs = _plan(router, ws, body, meta["test_cmd"], default_role)
+            task_state["subtasks"] = subs
+            subs, completed_by_id = _restore_subtask_checkpoint(task_state, default_role)
             for st in subs:
                 st.setdefault("role", default_role)
+            for item in completed_by_id.values():
+                results.append(
+                    SubResult(
+                        id=item["id"],
+                        role=item.get("role", default_role),
+                        ok=True,
+                        note=item.get("note", "completed before pause"),
+                        attempts=item.get("attempts", 1),
+                        files=set(item.get("files", [])),
+                    )
+                )
+            if completed_by_id:
+                log(f"  resuming with {len(completed_by_id)} completed subtask(s) checkpointed")
+            if branch:
+                task_state["completed_subtasks"] = list(completed_by_id.values())
+                _save_task_state(state_path, task_state)
+            for st in subs:
+                if st.get("id") in completed_by_id:
+                    continue
                 r = _run_sub(router, ws, cfg, st, meta["test_cmd"], log)
                 results.append(r)
                 if not r.ok:
                     status = "failed"
                     break
+                if branch:
+                    completed_by_id[r.id] = {
+                        "id": r.id,
+                        "role": r.role,
+                        "note": r.note,
+                        "attempts": r.attempts,
+                        "files": sorted(r.files),
+                    }
+                    task_state["completed_subtasks"] = list(completed_by_id.values())
+                    _save_task_state(state_path, task_state)
         if status == "done" and branch:
             code, changed_output = _git(branch_root, "diff", "--name-only", f"{original}...{branch}")
             if code:
@@ -496,10 +604,7 @@ def run_task(cfg: dict, task_path: Path, mock: bool = False, echo=print) -> str:
     if paused and branch and original:
         _save_task_state(
             state_path,
-            {
-                "project": project, "repo_root": str(branch_root),
-                "original": original, "branch": branch, "status": "paused",
-            },
+            task_state,
         )
     elif not paused:
         state_path.unlink(missing_ok=True)

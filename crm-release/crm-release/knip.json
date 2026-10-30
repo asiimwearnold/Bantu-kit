@@ -1,0 +1,51 @@
+{
+	"$schema": "https://unpkg.com/knip@6/schema.json",
+	"workspaces": {
+		".": {
+			"project": ["tools/**/*.ts"],
+			"ignoreIssues": {
+				"tools/oxlint/anti-slop/shared/dictionary-types.ts": [
+					"exports",
+					"types"
+				]
+			}
+		},
+		"apps/api": {
+			"entry": ["api/index.ts", "scripts/*.ts", "test/**/*.spec.ts"],
+			"project": ["src/**/*.ts", "scripts/**/*.ts"],
+			"ignoreIssues": {
+				"src/**/*.contracts.ts": ["exports", "types", "duplicates"],
+				"src/mailbox/mailbox.constants.ts": ["exports"]
+			}
+		},
+		"apps/agent": {
+			"entry": [
+				"agent/**/*.ts",
+				"scripts/*.ts",
+				"evals/**/*.eval.ts",
+				"test/**/*.spec.ts"
+			],
+			"project": ["agent/**/*.ts", "scripts/**/*.ts"]
+		},
+		"apps/app": {
+			"entry": [
+				"app/**/{page,layout,route,error,not-found,loading,template,default}.{ts,tsx}",
+				"test/**/*.spec.{ts,tsx}"
+			],
+			"project": ["**/*.{ts,tsx}"]
+		},
+		"packages/*": {
+			"entry": ["src/*.ts"],
+			"project": ["src/**/*.{ts,tsx}"]
+		},
+		"packages/db": {
+			"entry": ["src/*.ts"],
+			"project": ["src/**/*.ts"],
+			"ignoreDependencies": ["@prisma/client"]
+		},
+		"packages/ui": {
+			"entry": ["src/components/**/*.tsx", "src/lib/*.ts", "src/hooks/*.ts"],
+			"project": ["src/**/*.{ts,tsx}"]
+		}
+	}
+}

@@ -1,0 +1,28 @@
+{
+	"name": "@crm/telemetry",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./allowlist": "./src/allowlist.ts",
+		"./install": "./src/install.ts",
+		"./project": "./src/project.ts"
+	},
+	"scripts": {
+		"check-types": "tsc --noEmit",
+		"lint": "biome check .",
+		"test": "bun test",
+		"clean": "rm -rf .turbo node_modules"
+	},
+	"dependencies": {
+		"@crm/db": "workspace:*",
+		"@crm/env": "workspace:*",
+		"posthog-node": "^5.48.0"
+	},
+	"devDependencies": {
+		"@crm/typescript-config": "workspace:*",
+		"@types/node": "^24.10.1",
+		"typescript": "5.9.2"
+	}
+}

@@ -1,0 +1,132 @@
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, ready_for_review, synchronize]
+    branches: [main]
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  conventional:
+    name: conventional commit
+    if: >-
+      github.event.pull_request.draft == false &&
+      !startsWith(github.event.pull_request.head.ref, 'release-please--')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Write the title from the diff
+        id: autotitle
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          body=$(printf '%s' "$BODY" | tr -d '\r')
+
+          if ! .github/scripts/pr-title.sh check "$TITLE"; then
+            reason="it is not a release note"
+          elif ! .github/scripts/pr-title.sh sufficient "$BASE_SHA" "$HEAD_SHA" "$TITLE"; then
+            reason="it releases less than the commits on the branch do"
+          else
+            echo "\`$TITLE\` still covers the diff — leaving it alone." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          title=$(.github/scripts/pr-title.sh generate "$BASE_SHA" "$HEAD_SHA" "$BRANCH")
+
+          if [ "$title" = "$TITLE" ]; then
+            echo "\`$TITLE\` still describes the diff." >> "$GITHUB_STEP_SUMMARY"
+            echo "written=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          body=$(printf '%s\n\n<!-- pr-title: %s -->\n' \
+            "$(printf '%s\n' "$body" | grep -v '^<!-- pr-title: ' || true)" "$title")
+
+          if gh pr edit "$NUMBER" --title "$title" --body "$body"; then
+            echo "written=true" >> "$GITHUB_OUTPUT"
+            echo "Retitled #$NUMBER to \`$title\`, because $reason." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "The title needs changing, because $reason, but this workflow"
+            echo "could not write it. Set it by hand:"
+            echo
+            echo '```'
+            echo "$title"
+            echo '```'
+            echo
+            echo "A fork pull request grants a read-only token, which is the usual"
+            echo "cause. Check the step log for what the API returned."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: amannn/action-semantic-pull-request@v6
+        id: lint
+        if: steps.autotitle.outputs.written != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            revert
+            deps
+            chore
+            test
+            ci
+            build
+            style
+          requireScope: false
+          subjectPattern: ^(?![A-Z][a-z]).+[^.]$
+          subjectPatternError: >-
+            The subject "{subject}" of "{title}" reads like a sentence, not a
+            changelog line. Start it lowercase and in the imperative, and drop
+            the trailing full stop — "add bulk archive to the deals table",
+            not "Added bulk archive."
+
+      - uses: marocchino/sticky-pull-request-comment@v2
+        if: always()
+        continue-on-error: true
+        with:
+          header: pr-title
+          delete: ${{ steps.lint.outputs.error_message == null }}
+          message: |
+            **This pull request's title is not a Conventional Commit.**
+
+            It is squashed onto `main` as-is, so the title is the commit subject and the line that shows up in the changelog and the release notes.
+
+            ```
+            ${{ steps.lint.outputs.error_message }}
+            ```
+
+            | Title | Bump | Changelog heading |
+            | --- | --- | --- |
+            | `feat(app): add bulk archive to the deals table` | minor | Features |
+            | `fix(api): stop double-counting installs` | patch | Fixes |
+            | `feat(db)!: drop the legacy contacts table` | major | Features, flagged breaking |
+            | `chore(deps): bump turbo to 2.11` | none | hidden |
+
+            Edit the title and this check re-runs on its own.

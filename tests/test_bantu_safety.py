@@ -17,13 +17,16 @@ from bantu.daemon import _daemon_lock
 from bantu.orchestrator import (
     SubResult,
     _create_pull_request,
+    _project_config,
     _refresh_branch,
+    _restore_subtask_checkpoint,
     _review_outcome,
     _should_push_task_branch,
     parse_task,
     run_task,
 )
 from bantu.tools import Workspace
+from bantu.worker import CrmWorkerClient, _run_claimed_task, validate_repository_url
 
 
 class ProjectPathTests(unittest.TestCase):
@@ -47,6 +50,38 @@ class ProjectPathTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     project_dir("..")
 
+    def test_external_project_cannot_override_host_sandbox_policy(self):
+        cfg = {
+            "sandbox": {
+                "mode": "docker",
+                "image": "bantu-sandbox",
+                "network": "none",
+                "timeout_sec": 120,
+                "allow": ["python"],
+            }
+        }
+        meta = {
+            "sandbox": {
+                "mode": "local",
+                "image": "untrusted-image",
+                "network": "host",
+                "allow": ["powershell"],
+            }
+        }
+        project_cfg = _project_config(cfg, meta, external_projects=True)
+        self.assertEqual(project_cfg["sandbox"], cfg["sandbox"])
+        self.assertEqual(cfg["sandbox"]["mode"], "docker")
+
+    def test_bundled_project_can_select_its_trusted_sandbox_profile(self):
+        cfg = {"sandbox": {"mode": "docker", "image": "bantu-sandbox", "allow": ["python"]}}
+        meta = {"sandbox": {"image": "bantu-node", "allow": ["node", "npm"]}}
+        project_cfg = _project_config(cfg, meta, external_projects=False)
+        self.assertEqual(
+            project_cfg["sandbox"],
+            {"mode": "docker", "image": "bantu-node", "allow": ["node", "npm"]},
+        )
+        self.assertEqual(cfg["sandbox"]["image"], "bantu-sandbox")
+
     def test_rejects_credentials_embedded_in_repository_url(self):
         with tempfile.TemporaryDirectory() as tempdir:
             with patch.dict(os.environ, {"BANTU_PROJECTS_ROOT": tempdir}):
@@ -67,6 +102,98 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertEqual(provider["key_env"], "DEEPSEEK_API_KEY")
         self.assertEqual(config["pools"]["smart"][1], "deepseek/deepseek-flash")
         self.assertEqual(config["pools"]["fast"][1], "deepseek/deepseek-flash")
+
+
+class CrmWorkerTests(unittest.TestCase):
+    def test_rejects_non_https_and_credentialed_repository_urls(self):
+        for value in (
+            "ssh://git@github.com/team/project.git",
+            "file:///C:/private/repo",
+            "https://user:password@example.com/project.git",
+            "https://localhost/project.git",
+            "https://127.0.0.1/project.git",
+            "https://example.com:8443/project.git",
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_repository_url(value)
+
+    def test_client_requires_long_token_and_local_http(self):
+        with self.assertRaisesRegex(ValueError, "at least 32"):
+            CrmWorkerClient("http://localhost:3001", "short", "worker-1")
+        with self.assertRaisesRegex(ValueError, "HTTPS outside localhost"):
+            CrmWorkerClient("http://crm.example.com", "x" * 32, "worker-1")
+
+    def test_repository_host_must_resolve_only_to_public_addresses(self):
+        with patch(
+            "bantu.worker.socket.getaddrinfo",
+            return_value=[
+                (2, 1, 6, "", ("8.8.8.8", 443)),
+                (2, 1, 6, "", ("10.0.0.8", 443)),
+            ],
+        ):
+            with self.assertRaisesRegex(ValueError, "private or reserved"):
+                validate_repository_url("https://git.example.com/team/project.git")
+
+    def test_claim_rejects_malformed_task_data(self):
+        client = CrmWorkerClient("http://localhost:3001", "x" * 32, "worker-1")
+        with patch.object(client, "request", return_value={"task": {"id": "../bad"}}):
+            with self.assertRaisesRegex(RuntimeError, "malformed task"):
+                client.claim()
+
+    def test_completion_keeps_the_configured_worker_identity(self):
+        client = CrmWorkerClient("http://localhost:3001", "x" * 32, "worker-1")
+        with patch.object(client, "request") as request:
+            client.complete("task-1", {"workerId": "other-worker", "status": "FAILED"})
+        request.assert_called_once_with(
+            "tasks/task-1/complete",
+            {"status": "FAILED", "workerId": "worker-1"},
+        )
+
+    def test_task_exception_is_reported_as_failed(self):
+        class Client:
+            result = None
+
+            def heartbeat(self, _task_id):
+                return None
+
+            def complete(self, _task_id, payload):
+                self.result = payload
+
+        client = Client()
+        task = {
+            "id": "task-1",
+            "repository": "https://github.com/team/project.git",
+            "request": "Make a focused change and run the tests.",
+        }
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            with (
+                patch("bantu.worker.ROOT", root),
+                patch("bantu.worker.run_task", side_effect=RuntimeError("test failure")),
+            ):
+                _run_claimed_task(client, {}, task, log=lambda _line: None)
+            self.assertEqual(client.result["status"], "FAILED")
+            self.assertEqual(client.result["failure"], "test failure")
+            self.assertTrue((root / "tasks" / "failed" / "crm-task-1.md").is_file())
+
+
+class TaskCheckpointTests(unittest.TestCase):
+    def test_rejects_completed_results_not_in_saved_plan(self):
+        with self.assertRaisesRegex(RuntimeError, "completed subtask result is malformed"):
+            _restore_subtask_checkpoint(
+                {
+                    "subtasks": [{"id": "s1", "goal": "Update README."}],
+                    "completed_subtasks": [{"id": "s2", "role": "coder"}],
+                },
+                "coder",
+            )
+
+    def test_rejects_malformed_saved_subtask_fields(self):
+        with self.assertRaisesRegex(RuntimeError, "subtask 1 is malformed"):
+            _restore_subtask_checkpoint(
+                {"subtasks": [{"id": "s1", "role": 7, "goal": "Update README."}]},
+                "coder",
+            )
 
 
 class UsageStateTests(unittest.TestCase):
@@ -412,9 +539,11 @@ class ExternalRepositoryWorkflowTests(unittest.TestCase):
             }
 
             def write_task_change(router, ws, cfg, subtask, default_accept, log):
+                coder_calls.append(subtask["id"])
                 (project / "README.md").write_text("Updated README.\n", encoding="utf-8")
                 return SubResult("s1", "coder", True, "README updated", 1, {"README.md"})
 
+            coder_calls = []
             with patch.dict(os.environ, {"BANTU_PROJECTS_ROOT": str(projects)}):
                 with patch("bantu.orchestrator.Router", side_effect=lambda *a, **kw: Router(True, *a, **kw)):
                     with patch("bantu.orchestrator._run_sub", side_effect=write_task_change):
@@ -438,6 +567,7 @@ class ExternalRepositoryWorkflowTests(unittest.TestCase):
                         with patch("bantu.orchestrator.ROOT", bantu_home):
                             with patch("bantu.orchestrator._role_prompt", return_value="test role"):
                                 self.assertEqual(run_task(cfg, task, echo=lambda _: None), "done")
+            self.assertEqual(coder_calls, ["s1"])
 
             remote_branches = subprocess.run(
                 ["git", "--git-dir", str(remote), "branch", "--list", "bantu/*"],

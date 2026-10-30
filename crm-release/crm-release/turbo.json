@@ -1,0 +1,80 @@
+{
+	"$schema": "https://turborepo.dev/schema.json",
+	"ui": "tui",
+	"globalEnv": ["NODE_ENV"],
+	"globalPassThroughEnv": [
+		"DATABASE_URL",
+		"DATABASE_URL_UNPOOLED",
+		"TEST_DATABASE_URL",
+		"TEST_RUN_ID",
+		"BETTER_AUTH_SECRET",
+		"BETTER_AUTH_URL",
+		"ALLOWED_SIGN_IN",
+		"GOOGLE_CLIENT_ID",
+		"GOOGLE_CLIENT_SECRET",
+		"MICROSOFT_CLIENT_ID",
+		"MICROSOFT_CLIENT_SECRET",
+		"SLACK_CLIENT_ID",
+		"SLACK_CLIENT_SECRET",
+		"MICROSOFT_TENANT_ID",
+		"AUTH_COOKIE_DOMAIN",
+		"CRON_SECRET",
+		"REDIS_URL",
+		"CACHE_TTL_MS",
+		"PORT",
+		"PRISMA_LOG_QUERIES",
+		"PERPLEXITY_API_KEY",
+		"GITHUB_TOKEN",
+		"BLOB_READ_WRITE_TOKEN",
+		"AI_GATEWAY_API_KEY",
+		"VERCEL_OIDC_TOKEN",
+		"AGENT_URL",
+		"AGENT_BRIDGE_SECRET",
+		"MCP_ENCRYPTION_KEY",
+		"CHAT_EVENT_ENCRYPTION_KEY",
+		"CRM_TELEMETRY_DISABLED",
+		"DO_NOT_TRACK",
+		"VERCEL",
+		"VERCEL_GIT_COMMIT_SHA"
+	],
+
+	"tasks": {
+		"topo": {
+			"dependsOn": ["^topo"]
+		},
+		"build": {
+			"dependsOn": ["^build"],
+			"env": ["API_URL", "APP_URL", "NEXT_PUBLIC_API_URL"],
+			"inputs": ["$TURBO_DEFAULT$", ".env*"],
+			"outputs": [
+				".next/**",
+				"!.next/cache/**",
+				"!.next/dev/**",
+				"dist/**",
+				".output/**"
+			]
+		},
+		"lint": {
+			"dependsOn": ["topo"]
+		},
+		"check-types": {
+			"dependsOn": ["topo", "^build"]
+		},
+		"test": {
+			"dependsOn": ["topo", "^build"]
+		},
+		"dev": {
+			"dependsOn": ["^dev:prepare"],
+			"cache": false,
+			"persistent": true
+		},
+		"dev:headless": {
+			"dependsOn": ["^dev:prepare"],
+			"cache": false,
+			"persistent": true
+		},
+		"dev:prepare": {
+			"cache": false
+		}
+	}
+}

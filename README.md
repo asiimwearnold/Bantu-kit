@@ -73,8 +73,10 @@ BANTU can use external product repositories without adding their files or task b
    that clone and verify that its `origin` matches the requested repository.
 3. Ensure Git credentials are configured on the machine using SSH keys or a credential manager. Do not embed
    tokens or passwords in repository URLs.
-4. Put `bantu.project.json` in the product repo to define its test command, protected files, role, and sandbox.
-   Use `python -m bantu doctor` to check that configured external projects are independent Git repositories.
+4. Put `bantu.project.json` in the product repo to define its test command, protected files, and role. External
+   repositories cannot override the sandbox mode, image, network, timeout, or allowed commands in BANTU's host
+   configuration. Use `python -m bantu doctor` to check that configured external projects are independent Git
+   repositories.
 
 When configured, this root replaces the bundled `projects/` directory for task lookup. The BANTU host process
 performs clone, commit, and explicitly requested push operations using the host's Git credentials; model prompts
@@ -92,12 +94,31 @@ BANTU creates a `bantu/<task-id>` branch, commits there, and returns to its star
 `push: true` in the task header, it pushes only that branch after acceptance checks and the reviewer gate pass.
 It never force-pushes or writes directly to the default branch. If a provider runs out, BANTU commits the current
 branch locally and records resume state; rerunning the same task file resumes that branch, fast-forwards its base,
-and rebases the task commits before continuing. A failed push leaves the local task branch available for retry.
+and rebases the task commits before continuing. Completed subtasks are checkpointed and skipped on resume. A failed
+push leaves the local task branch available for retry.
 
 To also open a pull request, use `python -m bantu add "Add a feature" --project sente --repository <url> --pr`.
 This requires the GitHub CLI (`gh`) to be installed and authenticated. BANTU creates the PR only after acceptance
 and review pass; it does not merge or deploy. Task files, run reports, usage counters, and BANTU's role prompts
 remain in the BANTU repository. Only one BANTU daemon can own a task queue at a time.
+
+## Connect BANTU to CRM
+
+The CRM BANTU worker polls its authenticated internal API for human-approved tasks. Set these values in BANTU's
+local `.env`:
+
+```text
+BANTU_CRM_API_URL=https://crm.example.com
+BANTU_WORKER_TOKEN=<same secret configured in the CRM API>
+BANTU_PROJECTS_ROOT=C:\work\bantu-projects
+```
+
+Start the worker with `python -m bantu worker`. Keep Docker sandbox mode enabled. The worker accepts HTTPS Git
+repositories with public DNS addresses, without credentials or custom ports. A CRM user must confirm repository
+rights and an owner or admin must approve each task. BANTU tests and reviews each change, then pushes a task branch.
+It does not merge or deploy. Never expose the worker token in a browser or commit it to a repository.
+Run the worker behind an outbound firewall that blocks private and reserved network ranges. DNS checks alone do not
+prevent DNS rebinding or redirects to private addresses.
 
 ## Give BANTU new work
 

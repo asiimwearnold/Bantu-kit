@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+
+set -eu
+
+[ -n "${CRM_SKIP_HOOKS:-}" ] && exit 0
+
+deleting_only=1
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+	case "$local_sha" in
+	0000000000000000000000000000000000000000) ;;
+	*) deleting_only=0 ;;
+	esac
+done
+[ "$deleting_only" = "1" ] && exit 0
+
+fail() {
+	echo ""
+	echo "  \`$runner $1\` failed, so this push would have failed CI."
+	echo "  Fix it, or push anyway with --no-verify."
+	echo ""
+	exit 1
+}
+
+if command -v vp >/dev/null 2>&1; then
+	runner="vp run -w"
+	run_task() { vp run -w "$1"; }
+else
+	runner="bun run"
+	run_task() { bun run "$1"; }
+fi
+
+for task in audit check-types lint lint:slop test; do
+	echo "pre-push: $runner $task"
+	run_task "$task" || fail "$task"
+done

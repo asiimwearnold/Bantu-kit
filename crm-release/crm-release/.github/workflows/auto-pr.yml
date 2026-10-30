@@ -1,0 +1,62 @@
+name: Auto PR
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - release
+      - "release-please--**"
+      - "gh-readonly-queue/**"
+      - "dependabot/**"
+
+concurrency:
+  group: auto-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  open:
+    name: Open a pull request into main
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          existing=$(gh pr list --head "$BRANCH" --state all --limit 1 --json number,state --jq '.[0] | select(.) | "#\(.number) (\(.state))"')
+          if [ -n "$existing" ]; then
+            echo "\`$BRANCH\` already has pull request $existing — leaving it alone." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "$(git rev-list --count "origin/main..origin/$BRANCH")" = "0" ]; then
+            echo "\`$BRANCH\` has nothing \`main\` does not already have." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          title=$(.github/scripts/pr-title.sh generate "origin/main" "origin/$BRANCH" "$BRANCH")
+
+          body=$(cat <<EOF
+          Opened automatically when \`$BRANCH\` was pushed.
+
+          The title is written from the diff and rewritten as you push, because this is squashed onto \`main\` and the title becomes the commit subject and the changelog line. Retitle it yourself and it is yours — the automation stops touching it.
+
+          <!-- pr-title: $title -->
+          EOF
+          )
+
+          gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"
+
+          echo "Opened a pull request for \`$BRANCH\` titled \`$title\`." >> "$GITHUB_STEP_SUMMARY"

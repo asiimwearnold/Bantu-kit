@@ -30,6 +30,16 @@ def cmd_daemon(args, cfg):
     run_daemon(cfg, mock=args.mock)
 
 
+def cmd_worker(args, cfg):
+    from .worker import run_worker, worker_settings
+
+    try:
+        api_url, token, poll_seconds = worker_settings()
+        run_worker(cfg, api_url, token, poll_seconds)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def cmd_add(args, cfg):
     inbox = ROOT / "tasks" / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
@@ -137,6 +147,8 @@ def main():
     p = sub.add_parser("daemon", help="watch tasks/inbox and run tasks as they appear")
     p.add_argument("--mock", action="store_true")
     p.set_defaults(fn=cmd_daemon)
+    p = sub.add_parser("worker", help="poll the CRM for approved BANTU development tasks")
+    p.set_defaults(fn=cmd_worker)
     p = sub.add_parser("add", help="queue a task from text")
     p.add_argument("text")
     p.add_argument("--project", required=True)
